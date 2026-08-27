@@ -1,0 +1,25 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://${DB_HOST:localhost}:5432/pgdb}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+  jpa:
+    open-in-view: false
+    hibernate.ddl-auto: validate
+  flyway:
+    enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+management:
+  endpoints.web.exposure.include: health,info,metrics,prometheus
+app:
+  duplicate-window: PT15M
+  kafka.topic: transaction-events
+  outbox.batch-size: 100
+  outbox.poll-delay-ms: 2000
+springdoc:
+  swagger-ui:
+    path: /swagger.html

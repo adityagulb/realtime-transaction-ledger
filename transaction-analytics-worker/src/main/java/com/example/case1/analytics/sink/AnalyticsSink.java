@@ -1,0 +1,1 @@
+package com.example.case1.analytics.sink; import com.example.case1.analytics.model.TransactionEvent; public interface AnalyticsSink { void write(TransactionEvent event); }

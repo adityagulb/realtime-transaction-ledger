@@ -1,0 +1,8 @@
+spring:
+  datasource:
+    url: ${SNOWFLAKE_URL}
+    username: ${SNOWFLAKE_USER}
+    password: ${SNOWFLAKE_PASSWORD}
+    driver-class-name: net.snowflake.client.jdbc.SnowflakeDriver
+app:
+  sink: snowflake
