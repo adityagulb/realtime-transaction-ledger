@@ -1,0 +1,23 @@
+package com.aditya.analytics.sink;
+
+import com.aditya.analytics.model.TransactionEvent;
+import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.math.BigDecimal;
+import java.time.*;
+import java.util.UUID;
+
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class SnowflakeAnalyticsSinkTest {
+    @Test
+    void usesIdempotentMerge() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        SnowflakeAnalyticsSink sink = new SnowflakeAnalyticsSink(jdbc);
+        TransactionEvent e = new TransactionEvent(UUID.randomUUID(), UUID.randomUUID(), "tx1", BigDecimal.ONE, "USD", LocalDate.now(), "ACCEPTED", Instant.now());
+        sink.write(e);
+        verify(jdbc).update(startsWith("merge into TRANSACTION_ANALYTICS"), any(Object[].class));
+    }
+}

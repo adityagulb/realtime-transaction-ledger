@@ -15,6 +15,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+    networks:
+      - transaction-network
+
     healthcheck:
       test:
         [
@@ -30,6 +33,9 @@ services:
     image: apache/kafka:latest
     container_name: kafka
 
+    networks:
+      - transaction-network
+
     ports:
       - "9092:9092"
 
@@ -37,15 +43,28 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
 
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: >
+        INTERNAL://:29092,
+        EXTERNAL://:9092,
+        CONTROLLER://:9093
 
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_ADVERTISED_LISTENERS: >
+        INTERNAL://kafka:29092,
+        EXTERNAL://localhost:9092
 
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >
-        CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+        INTERNAL:PLAINTEXT,
+        EXTERNAL:PLAINTEXT,
+        CONTROLLER:PLAINTEXT
 
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
 
 
   transaction-processor:
@@ -54,6 +73,9 @@ services:
       dockerfile: Dockerfile
 
     container_name: transaction-processor
+
+    networks:
+      - transaction-network
 
     ports:
       - "8080:8080"
@@ -64,7 +86,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
 
       DB_HOST: postgres
-      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
 
     depends_on:
       postgres:
@@ -76,3 +98,7 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  transaction-network:
+    name: transaction-network

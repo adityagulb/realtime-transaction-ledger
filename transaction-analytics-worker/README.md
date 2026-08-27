@@ -8,6 +8,11 @@ Kafka consumer for VP Case Study 1. It receives transaction events, retries tran
 
 The Snowflake writer uses `MERGE` keyed by `EVENT_ID`, making repeated Kafka delivery idempotent.
 
+## Run locally
+1. Copy .env.example file to .env file and change the password for Postgress as your wish,  in .env file
+2. Start Snowflake, Kafka and Application by running : `docker compose up -d`
+
+
 ## Kafka retry / DLQ
 Spring Kafka `DefaultErrorHandler` uses exponential backoff. After retries are exhausted, the record is sent to `<original-topic>.DLT`.
 

@@ -1,0 +1,31 @@
+services:
+
+  transaction-analytics-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: transaction-analytics-worker
+
+    environment:
+      # Kafka
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_KAFKA_CONSUMER_GROUP_ID: transaction-analytics
+
+      # Application
+      APP_KAFKA_TOPIC: transaction-events
+      APP_KAFKA_GROUP: transaction-analytics
+
+      # For now use log.
+      # Change to snowflake after Snowflake configuration is ready.
+      APP_SINK: log
+
+    networks:
+      - transaction-network
+
+    restart: unless-stopped
+
+
+networks:
+  transaction-network:
+    external: true
