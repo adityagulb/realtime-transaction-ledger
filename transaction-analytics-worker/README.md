@@ -9,7 +9,7 @@ Kafka consumer for VP Case Study 1. It receives transaction events, retries tran
 The Snowflake writer uses `MERGE` keyed by `EVENT_ID`, making repeated Kafka delivery idempotent.
 
 ## Run locally
-1. Copy .env.example file to .env file and change the password for Postgress as your wish,  in .env file
+1. Copy .env.example file to .env file and add the details for Snowflake,  in .env file
 2. Start Snowflake, Kafka and Application by running : `docker compose up -d`
 
 
