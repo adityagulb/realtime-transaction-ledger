@@ -1,0 +1,2 @@
+{"eventId":"evt-2002","transactionId":"txn-1002","eventType":"TRANSFER","accountId":"ACC-001","counterpartyAccountId":"ACC-002","amount":550.00,"currency":"INR","transactionTimestamp":"2026-09-02T10:05:00Z","eventVersion":2,"source":"BANKING_API"}
+{"eventId":"evt-1004","transactionId":"txn-1004","eventType":"DEPOSIT","accountId":"ACC-003","counterpartyAccountId":null,"amount":900.00,"currency":"INR","transactionTimestamp":"2026-09-02T10:10:00Z","eventVersion":1,"source":"BANKING_API"}

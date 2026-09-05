@@ -1,21 +1,58 @@
 server:
   port: 8081
+
 spring:
   kafka:
+
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:9092}
+
     consumer:
-      group-id: transaction-analytics
+      group-id: ${KAFKA_GROUP_ID:transaction-analytics}
+
       auto-offset-reset: earliest
+
       enable-auto-commit: false
+
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
+
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+
 management:
-  endpoints.web.exposure.include: health,info,metrics,prometheus
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+
 app:
+
+  # log = only log events
+  # s3  = batch transaction events and upload to S3
   sink: ${ANALYTICS_SINK:log}
+
   kafka:
-    topic: transaction-events
-    group: transaction-analytics
+    topic: ${APP_KAFKA_TOPIC:transaction-events}
+
+    group: ${APP_KAFKA_GROUP:transaction-analytics}
+
+  s3:
+
+    bucket: ${S3_BUCKET:transaction-analytics-demo}
+
+    prefix: ${S3_PREFIX:banking-transactions}
+
+    region: ${AWS_REGION:ap-south-1}
+
+  batch:
+
+    # Number of Kafka events per S3 object
+    max-records: ${BATCH_MAX_RECORDS:500}
+
+    # Flush incomplete batch every 30 seconds
+    flush-interval-ms: ${BATCH_FLUSH_INTERVAL_MS:30000}

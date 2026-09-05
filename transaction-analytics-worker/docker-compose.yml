@@ -1,6 +1,7 @@
 services:
 
   transaction-analytics-worker:
+
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,17 +9,53 @@ services:
     container_name: transaction-analytics-worker
 
     environment:
-      # Kafka
-      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      SPRING_KAFKA_CONSUMER_GROUP_ID: transaction-analytics
 
-      # Application
+      # ================================
+      # Kafka
+      # ================================
+
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
       APP_KAFKA_TOPIC: transaction-events
+
       APP_KAFKA_GROUP: transaction-analytics
 
-      # For now use log.
-      # Change to snowflake after Snowflake configuration is ready.
-      APP_SINK: log
+
+      # ================================
+      # Sink
+      # ================================
+
+      ANALYTICS_SINK: s3
+
+
+      # ================================
+      # AWS S3
+      # ================================
+
+      AWS_REGION: ${AWS_REGION}
+
+      S3_BUCKET: ${S3_BUCKET}
+
+      S3_PREFIX: ${S3_PREFIX:-banking-transactions}
+
+
+      # ================================
+      # Batch
+      # ================================
+
+      BATCH_MAX_RECORDS: ${BATCH_MAX_RECORDS:-500}
+
+      BATCH_FLUSH_INTERVAL_MS: ${BATCH_FLUSH_INTERVAL_MS:-30000}
+
+
+      # For local Docker testing only.
+      #
+      # In AWS deployment prefer IAM roles
+      # instead of injecting credentials.
+
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
 
     networks:
       - transaction-network
@@ -27,5 +64,7 @@ services:
 
 
 networks:
+
   transaction-network:
+
     external: true
