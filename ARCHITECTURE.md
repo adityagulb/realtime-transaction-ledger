@@ -1,102 +1,181 @@
-# Architecture
+# Real-Time Transaction Ledger & Analytics Pipeline
 
-## 1. End-to-End Architecture
+Enterprise-style transaction processing and analytics case study built using **Java 17, Spring Boot, PostgreSQL, Kafka, Amazon S3 and Snowflake**.
 
-The solution uses a transactional outbox for reliable event publication and a file-based analytics ingestion boundary before Snowflake.
-
-```mermaid
-flowchart LR
-    C[Client] -->|POST /api/v1/transactions| API[Transaction Processor]
-
-    API --> V[Validation Chain]
-    V -->|Rejected| RJ[(rejected_transaction)]
-    V -->|Valid| DB[(PostgreSQL)]
-
-    DB --> LT[(ledger_transaction)]
-    DB --> OB[(outbox_event)]
-
-    OB -->|FOR UPDATE SKIP LOCKED| POLL[DB Poller]
-    POLL --> K[Kafka<br/>transaction-events]
-
-    K --> W[Analytics Worker]
-    W -->|Retry exhausted| DLT[transaction-events.DLT]
-    W --> B[Batch + NDJSON]
-    B --> S3[(Amazon S3)]
-
-    S3 --> STAGE[Snowflake External Stage]
-    STAGE -->|COPY INTO| LANDING[(Landing)]
-    LANDING -->|Stream + Task + MERGE| RAW[(Raw)]
-    RAW -->|Streams + Tasks + MERGE| PREP[(Prepared)]
-    PREP -->|Streams + Tasks + MERGE| CUR[(Curated)]
-
-    CUR --> GC[GC View<br/>General Consumption]
-    CUR --> HC[HC View<br/>High Clearance]
-```
-
-The final analytics flow is:
-
-```text
-HTTP
- -> PostgreSQL Ledger + Outbox
- -> DB Poller
- -> Kafka
- -> Analytics Worker
- -> Batched NDJSON
- -> Amazon S3
- -> Snowflake Landing
- -> Raw
- -> Prepared
- -> Curated
- -> GC / HC consumption views
-```
+The solution demonstrates reliable transaction processing, asynchronous event delivery, durable analytical ingestion, layered Snowflake data engineering, security, governance, reconciliation and failure recovery.
 
 ---
 
-## 2. Transaction Processing and Transactional Outbox
-
-The transaction processor owns the synchronous transactional boundary.
+## Architecture
 
 ```text
-HTTP Request
-     |
-     v
-Validation Chain
-     |
-     +---- invalid ----> rejected_transaction
-     |
-    valid
-     |
-     v
-@Transactional
-     |
-     +---- ledger_transaction
-     |
-     +---- outbox_event
+Client
+  |
+  | REST
+  v
+Transaction Processor
+  |
+  v
+PostgreSQL
+  |
+  +-- ledger_transaction
+  +-- outbox_event
+  +-- rejected_transaction
+  |
+  v
+DB Poller
+  |
+  | FOR UPDATE SKIP LOCKED
+  v
+Kafka
+  |
+  | transaction-events
+  v
+Transaction Analytics Worker
+  |
+  +-- Retry / DLT
+  +-- Event batching
+  +-- NDJSON serialization
+  |
+  v
+Amazon S3
+  |
+  v
+Snowflake External Stage
+  |
+  | COPY INTO
+  v
+Landing
+  |
+  | Stream + Task + MERGE
+  v
+Raw
+  |
+  | Streams + Tasks + MERGE
+  v
+Prepared
+  |
+  | Streams + Tasks
+  v
+Curated
+  |
+  +------> GC Views
+  |
+  +------> HC Views
 ```
 
-The ledger transaction and its corresponding outbox event are persisted in the same PostgreSQL ACID transaction.
+For the detailed architecture, reliability model, Snowflake layers, security, governance and recovery strategy, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
-This avoids a database/Kafka dual-write problem.
+---
 
-The DB poller reads eligible outbox rows in batches using:
+# Repository Structure
+
+```text
+realtime-transaction-ledger/
+│
+├── banking-transaction-processor/
+│   └── REST -> PostgreSQL -> Transactional Outbox -> Kafka
+│
+├── transaction-analytics-worker/
+│   └── Kafka -> Retry/DLT -> Batch -> NDJSON -> Amazon S3
+│
+├── snowflake-data-pipeline/
+│   └── S3 -> Landing -> Raw -> Prepared -> Curated
+│
+├── ARCHITECTURE.md
+└── README.md
+```
+
+The solution separates responsibilities between transactional processing, event integration and analytical data engineering.
+
+---
+
+# 1. Banking Transaction Processor
+
+`banking-transaction-processor` is the synchronous transaction-processing service.
+
+### Responsibilities
+
+* exposes transaction REST APIs
+* validates incoming transactions
+* applies business validation using a Chain of Responsibility
+* persists ledger transactions
+* provides duplicate/idempotency protection
+* writes ledger and outbox records atomically
+* audits rejected transactions
+* polls unpublished outbox records
+* publishes transaction events to Kafka
+* exposes health and operational metrics
+
+### Transactional Boundary
+
+```text
+POST /api/v1/transactions
+          |
+          v
+    Validation Chain
+          |
+    +-----+------+
+    |            |
+ Rejected       Valid
+    |            |
+    v            v
+Audit       @Transactional
+                 |
+          +------+------+
+          |             |
+          v             v
+       Ledger         Outbox
+```
+
+The ledger transaction and corresponding outbox event are committed in the **same PostgreSQL transaction**.
+
+This avoids the database/Kafka dual-write problem.
+
+---
+
+# 2. Transactional Outbox
+
+A scheduled DB poller reads unpublished outbox records using:
 
 ```sql
 FOR UPDATE SKIP LOCKED
 ```
 
-This allows multiple poller instances to safely share work.
+This allows multiple poller instances to process different records concurrently without competing for the same row.
 
-### Delivery Semantics
+```text
+PostgreSQL
+     |
+     v
+outbox_event
+     |
+     v
+DB Poller
+     |
+     v
+Kafka
+```
 
 Outbox-to-Kafka delivery is **at-least-once**.
 
-Duplicate delivery is therefore expected, and downstream processing must be idempotent.
+Therefore duplicate event delivery is considered a normal failure scenario and downstream components are designed to tolerate replay.
 
 ---
 
-## 3. Kafka Analytics Worker
+# 3. Transaction Analytics Worker
 
-The analytics worker consumes transaction events from Kafka and persists them to S3.
+`transaction-analytics-worker` consumes transaction events from Kafka.
+
+### Responsibilities
+
+* Kafka consumption
+* event deserialization
+* retry handling
+* Dead Letter Topic handling
+* event batching
+* NDJSON serialization
+* Amazon S3 upload
 
 ```text
 Kafka
@@ -105,163 +184,127 @@ Kafka
 Analytics Worker
   |
   +-- Deserialize
-  +-- Validate
   +-- Retry
-  +-- DLT for poison events
-  +-- Batch events
+  +-- DLT
+  +-- Batch
   |
   v
-NDJSON file
+NDJSON
   |
   v
 Amazon S3
 ```
 
-The analytics worker does **not** directly write to Snowflake.
+The worker intentionally does **not** directly write analytical records into Snowflake.
 
-Its responsibility ends after the batch is successfully persisted to S3.
+Amazon S3 acts as the durable integration boundary between real-time event processing and the analytical data platform.
 
-### Batching
+---
 
-Events are flushed based on:
+# 4. Amazon S3 Integration Boundary
 
-- maximum record count
-- maximum flush interval
+Events are grouped into NDJSON files before upload.
 
-This avoids creating one S3 object per Kafka event while ensuring low-volume events are not retained indefinitely in memory.
-
-Example object path:
+Example:
 
 ```text
 banking-transactions/
-  year=2026/
-    month=09/
-      day=05/
-        hour=13/
-          transactions-<timestamp>-<uuid>.json
+    year=2026/
+        month=09/
+            day=05/
+                hour=13/
+                    transactions-<timestamp>-<uuid>.json
 ```
 
-Example NDJSON:
+Batching is controlled by:
 
-```json
-{"eventId":"...","transactionId":"txn-1001","amount":100.00}
-{"eventId":"...","transactionId":"txn-1002","amount":250.00}
-{"eventId":"...","transactionId":"txn-1003","amount":500.00}
-```
+* maximum record count
+* flush interval
 
-For reliable delivery, Kafka offsets should only be acknowledged after the corresponding batch has been durably uploaded to S3.
+Using S3 provides:
+
+* durable replay
+* decoupling from Snowflake availability
+* bulk-oriented analytical ingestion
+* source-file auditability
+* easier failure recovery
+* independent scaling of application and analytical workloads
+
+Kafka processing should only be considered successfully persisted after the corresponding batch has been durably written to S3.
 
 ---
 
-## 4. Why S3 Is the Analytics Integration Boundary
+# 5. Snowflake Data Pipeline
 
-S3 separates the event-processing application from the analytical platform.
-
-Benefits include:
-
-- durable replay source
-- decoupling Kafka consumers from Snowflake availability
-- controlled file batching
-- easier operational recovery
-- auditable source files
-- support for bulk-oriented Snowflake loading
-- reduced direct dependency between Java code and Snowflake
-
-If Snowflake is unavailable, source files remain in S3 and can be loaded later without requesting the source application to regenerate data.
-
----
-
-## 5. Snowflake Data Platform
-
-Once data has been persisted to S3, Snowflake becomes responsible for ingestion, transformation, modeling and analytical consumption.
+`snowflake-data-pipeline` owns analytical ingestion and transformation after the S3 boundary.
 
 ```text
 Amazon S3
-    |
-    v
+     |
+     v
 External Stage
-    |
-    v
+     |
+     v
 COPY INTO
-    |
-    v
+     |
+     v
 Landing
-    |
-    v
+     |
+     v
 Raw
-    |
-    v
+     |
+     v
 Prepared
-    |
-    v
+     |
+     v
 Curated
 ```
 
-Snowflake-native processing is preferred once the data enters the platform, avoiding unnecessary extraction back into Java services.
+Once data enters Snowflake, transformations are primarily executed using **Snowflake-native SQL, Streams, Tasks and MERGE operations** rather than moving data back into Java.
 
 ---
 
-## 6. Snowflake Data Layers
+# 6. Snowflake Data Layers
 
-### 6.1 Landing
+## Landing
 
-**Purpose**
+The Landing layer is the ingestion boundary.
 
-- ingestion boundary
-- preserve source representation
-- support replay and troubleshooting
-- capture ingestion metadata
+Typical characteristics:
 
-Typical structure:
+* source-oriented data
+* minimal transformation
+* semi-structured `VARIANT` payload
+* source filename
+* source row number
+* ingestion timestamp
 
-```text
-PAYLOAD VARIANT
-SOURCE_FILE
-SOURCE_ROW_NUMBER
-LOAD_TIMESTAMP
-```
-
-Landing data is kept close to the source format with minimal transformation.
+Its purpose is to preserve the source representation for traceability, troubleshooting and replay.
 
 ---
 
-### 6.2 Raw
+## Raw
 
-**Purpose**
+The Raw layer converts source events into typed analytical records.
 
-- convert semi-structured payloads into typed columns
-- deduplicate events
-- retain technical history
-- apply basic technical data-quality rules
+Responsibilities include:
 
-Example columns:
+* JSON extraction
+* data-type conversion
+* technical validation
+* event deduplication
+* historical event retention
+* ingestion metadata
 
-```text
-EVENT_ID
-TRANSACTION_ID
-LEDGER_ID
-AMOUNT
-CURRENCY
-SETTLEMENT_DATE
-STATUS
-OCCURRED_AT
-SOURCE_FILE
-LOAD_TIMESTAMP
-```
-
-Landing-to-Raw processing is performed using Snowflake-native SQL and `MERGE`.
-
-`EVENT_ID` and business identifiers provide replay-safe idempotency.
+`MERGE` and event identifiers make processing replay-safe and idempotent.
 
 ---
 
-### 6.3 Prepared
+## Prepared
 
-**Purpose**
+The Prepared layer contains reusable enterprise data models.
 
-Prepared contains reusable enterprise models rather than source-specific structures.
-
-Typical objects can include:
+Typical structures include:
 
 ```text
 DIM_ACCOUNT
@@ -269,93 +312,69 @@ FACT_TRANSACTION
 BRIDGE_TRANSACTION_ACCOUNT
 ```
 
-This layer is where:
-
-- business relationships are modeled
-- facts and dimensions are maintained
-- reusable enterprise definitions are applied
-- sensitive attributes can be protected before consumption
+This layer separates business modeling from source-system structures.
 
 ---
 
-### 6.4 Curated
+## Curated
 
-**Purpose**
+The Curated layer exposes business-oriented data products.
 
-Curated exposes business-oriented data products for downstream consumers.
+Potential consumers include:
 
-Consumers can include:
+* reporting
+* Business Intelligence
+* analytics
+* data science
+* downstream applications
+* controlled data sharing
 
-- Business Intelligence
-- reporting
-- analytics
-- data science
-- downstream applications
-- controlled data sharing
-
-Curated models are optimized around consumption use cases rather than source-system structures.
+Curated models are designed around consumption requirements rather than ingestion structures.
 
 ---
 
-## 7. Incremental Data Flow with Streams and Tasks
+# 7. Snowflake Streams and Tasks
 
-Snowflake Streams and Tasks are used for incremental processing.
+Incremental processing is implemented using Snowflake-native capabilities.
 
 ```text
-S3
- |
-COPY INTO
- |
- v
 Landing
- |
+   |
 Landing Stream
- |
+   |
 Landing -> Raw Task
- |
- v
+   |
+   v
 Raw
- |
+   |
 Raw Streams
- |
+   |
 Raw -> Prepared Tasks
- |
- v
+   |
+   v
 Prepared
- |
+   |
 Prepared Stream
- |
+   |
 Prepared -> Curated Task
- |
- v
+   |
+   v
 Curated
 ```
 
-### Stream
+A **Stream** identifies what data changed.
 
-A Stream identifies **what data changed**.
+A **Task** determines when processing runs and executes the required SQL or `MERGE`.
 
-### Task
-
-A Task defines **when processing runs and what SQL is executed**.
-
-Typical processing includes:
-
-- `COPY INTO`
-- `MERGE`
-- incremental transformations
-- fact updates
-- dimension updates
-- bridge updates
-- curated aggregations
+This keeps set-based data transformation close to the data.
 
 ---
 
-## 8. Security and RBAC
+# 8. Security and Governance
 
-Snowflake security is based on roles and privileges.
+The Snowflake design follows least-privilege access using RBAC.
 
-Conceptually:
+Access can be controlled at multiple levels:
 
 ```text
 User
@@ -363,14 +382,14 @@ User
   v
 Role
   |
-  +-- Database access
-  +-- Schema access
-  +-- Table / View privileges
-  +-- Row Access Policies
-  +-- Masking Policies
+  +-- Database
+  +-- Schema
+  +-- Table / View
+  +-- Row Access Policy
+  +-- Masking Policy
 ```
 
-Example roles:
+Example roles include:
 
 ```text
 BANKING_PIPELINE_ROLE
@@ -378,125 +397,78 @@ BANKING_ANALYST_ROLE
 BANKING_HIGH_CLEARANCE_ROLE
 ```
 
-The design follows least-privilege principles.
+Row access policies can restrict which records a consumer can access.
 
-Access is separated between:
-
-- pipeline/service roles
-- normal consumption roles
-- privileged/high-clearance roles
-
-Row access policies can restrict which rows a role is allowed to see, while masking policies can protect sensitive values at query time.
+Masking policies protect sensitive column values based on authorization.
 
 ---
 
-## 9. PII Protection and GC / HC Consumption Views
+# 9. GC and HC Consumption
 
-Sensitive information remains protected in the underlying/core data structures.
-
-The consumption model is:
+Sensitive information remains protected in the underlying/core model.
 
 ```text
-Prepared / Core Tables
-        |
-        | Protected sensitive data
-        |
-        v
+Prepared / Core Data
+         |
+         v
       Curated
-        |
-        +-----------------------------+
-        |                             |
-        v                             v
-GC View                         HC View
-General Consumption             High Clearance
-        |                             |
-Masked / protected PII          Authorized clear-text access
+         |
+    +----+----+
+    |         |
+    v         v
+   GC        HC
+  View      View
 ```
 
 ### GC — General Consumption
 
-Used by normal analytical users.
+Used for standard analytical consumption.
 
-PII remains masked, protected or encrypted according to the security policy.
+Sensitive attributes remain masked, protected or encrypted according to policy.
 
 ### HC — High Clearance
 
 Restricted to explicitly authorized roles.
 
-Where the design requires explicit column-level encryption, Snowflake encryption/decryption functions can be used in conjunction with RBAC and secure views so that only privileged consumers can obtain the clear-text value.
+Authorized users can access sensitive values where business and governance policies permit it.
 
-The underlying/core table remains protected rather than storing an unrestricted clear-text copy for general use.
+The design can combine:
 
----
+* RBAC
+* secure views
+* masking policies
+* row access policies
+* controlled encryption/decryption
 
-## 10. Metadata and Governance
-
-Technical and business metadata should be managed independently from the physical pipeline.
-
-An enterprise catalog such as Collibra, or another metadata repository, can hold:
-
-```text
-Dataset name
-Business definition
-Data owner
-Technical owner
-Source system
-Schema
-Column definitions
-PII classification
-Security classification
-Refresh frequency
-SLA
-Retention policy
-Quality rules
-Lineage
-```
-
-This separates data governance concerns from pipeline execution.
-
-### Responsibilities
-
-**Data Architect**
-
-- platform architecture
-- data-layer design
-- integration patterns
-- scalability
-- security architecture
-
-**Data Modeler**
-
-- dimensions
-- facts
-- bridge tables
-- business entities
-- relationships
-- semantic consistency
-
-**Data Governance**
-
-- ownership
-- classification
-- PII identification
-- access policy
-- retention
-- lineage
-- quality standards
-
-**Engineering Team**
-
-- pipeline implementation
-- testing
-- deployment
-- monitoring
-- failure handling
-- operational support
+to protect PII throughout the consumption model.
 
 ---
 
-## 11. Data Quality and Reconciliation
+# 10. Metadata and Data Governance
 
-Every stage should be reconcilable.
+Technical and business metadata can be maintained in an enterprise catalog such as Collibra or another metadata repository.
+
+Examples include:
+
+* business definitions
+* dataset ownership
+* source systems
+* schemas and columns
+* PII classification
+* security classification
+* refresh frequency
+* SLA
+* retention
+* quality rules
+* lineage
+
+This separates governance metadata from physical pipeline execution.
+
+---
+
+# 11. Reconciliation and Data Quality
+
+The pipeline is designed so that records can be reconciled across every stage.
 
 Example:
 
@@ -520,23 +492,23 @@ Prepared                        9,998
 Curated                         9,998
 ```
 
-Data-quality checks can include:
+Quality checks include:
 
-- mandatory business keys
-- duplicate `EVENT_ID`
-- invalid amount
-- invalid currency
-- invalid data types
-- referential-integrity checks
-- source-to-target record reconciliation
+* mandatory fields
+* duplicate event IDs
+* invalid amounts
+* invalid currencies
+* invalid data types
+* referential integrity
+* source-to-target reconciliation
 
-Invalid or rejected records must remain traceable and recoverable.
+Rejected data remains traceable for investigation and controlled reprocessing.
 
 ---
 
-## 12. Lineage and Auditability
+# 12. End-to-End Lineage
 
-A curated transaction should be traceable back through the complete pipeline.
+A curated transaction can be traced back through the complete processing chain.
 
 ```text
 Curated
@@ -547,159 +519,179 @@ Raw
    |
 Landing
    |
-S3 object
+S3 File
    |
-Kafka event
+Kafka Event
    |
-Outbox event
+Outbox Event
    |
-Ledger transaction
+Ledger Transaction
 ```
 
-Useful lineage attributes include:
+Important lineage identifiers include:
+
+* `EVENT_ID`
+* `TRANSACTION_ID`
+* source filename
+* source row number
+* ingestion timestamp
+* processing timestamp
+
+---
+
+# 13. Failure and Recovery Model
+
+The design isolates failures at each architectural boundary.
+
+### PostgreSQL failure
+
+Ledger and outbox remain atomic; no partial transaction is committed.
+
+### Kafka / DB Poller failure
+
+Unpublished outbox records remain available for retry.
+
+### Analytics Worker failure
+
+Kafka retains unprocessed events.
+
+### Poison event
+
+Retry is attempted before the event is routed to the DLT.
+
+### S3 failure
+
+The batch is not considered durably persisted until upload succeeds.
+
+### Snowflake failure
+
+Source files remain safely available in S3 and can be processed after recovery.
+
+### Transformation failure
+
+Snowflake Task history, Streams and idempotent `MERGE` processing support controlled recovery.
+
+---
+
+# 14. Technology Stack
+
+### Application
+
+* Java 17
+* Spring Boot
+* Spring Data JPA
+* Spring Kafka
+* Spring JDBC
+* Maven
+
+### Transactional Data
+
+* PostgreSQL
+* Flyway
+
+### Messaging
+
+* Apache Kafka
+
+### Cloud / Integration
+
+* Amazon S3
+* AWS SDK
+* Terraform
+
+### Analytics
+
+* Snowflake
+* External Stages
+* `COPY INTO`
+* Streams
+* Tasks
+* `MERGE`
+* `VARIANT`
+
+### Security / Governance
+
+* Snowflake RBAC
+* Row Access Policies
+* Masking Policies
+* GC / HC consumption model
+* enterprise metadata/catalog integration
+
+### Testing
+
+* JUnit 5
+* Mockito
+* Spring Boot Test
+* Testcontainers
+
+---
+
+# 15. Key Design Principles
+
+The architecture demonstrates several enterprise design principles:
+
+1. **Transactional consistency**
+   Ledger and outbox are committed atomically.
+
+2. **Reliable asynchronous delivery**
+   Kafka decouples transactional processing from downstream analytics.
+
+3. **At-least-once processing**
+   Duplicate delivery is expected and handled through idempotent design.
+
+4. **Durable analytics boundary**
+   S3 provides replayability and isolates Snowflake availability from Kafka processing.
+
+5. **Separation of responsibilities**
+   Java handles transactional and integration concerns; Snowflake handles analytical transformation and modeling.
+
+6. **Incremental data engineering**
+   Streams and Tasks process changes rather than repeatedly rebuilding entire datasets.
+
+7. **Layered analytical modeling**
+   Landing, Raw, Prepared and Curated have clearly separated responsibilities.
+
+8. **Enterprise security**
+   RBAC, row-level controls, masking and differentiated GC/HC consumption protect sensitive data.
+
+9. **Auditability and lineage**
+   Transactions can be traced from business consumption back to their transactional source.
+
+10. **Recoverability**
+    Durable boundaries, retries, DLT handling and idempotent processing support controlled replay.
+
+11. **Governance**
+    Ownership, metadata, classification, lineage and quality rules are treated as part of the architecture rather than afterthoughts.
+
+---
+
+# Design Summary
 
 ```text
-EVENT_ID
-TRANSACTION_ID
-SOURCE_FILE
-SOURCE_ROW_NUMBER
-LOAD_TIMESTAMP
-PROCESSING_TIMESTAMP
-```
-
-This supports audit, reconciliation, root-cause analysis and controlled replay.
-
----
-
-## 13. Failure Handling and Recovery
-
-### PostgreSQL Failure
-
-No partial ledger/outbox transaction is committed.
-
-Clients can safely retry using transaction identifiers and duplicate protection.
-
-### Kafka / Poller Failure
-
-Outbox records remain available for retry.
-
-The ledger remains the transactional system of record.
-
-### Analytics Worker Failure
-
-Kafka retains uncommitted events.
-
-Retries and DLT handling isolate transient and poison-message failures.
-
-### S3 Failure
-
-The Kafka batch must not be considered successfully persisted until the S3 upload completes.
-
-Failed uploads are retried.
-
-### Snowflake Load Failure
-
-The S3 source file remains available.
-
-Loading can therefore resume after Snowflake recovery without reproducing the source transaction.
-
-### Transformation Failure
-
-Snowflake Task history provides operational visibility.
-
-Streams plus idempotent `MERGE` operations allow controlled retry and replay.
-
----
-
-## 14. Performance and Cost
-
-Important Snowflake considerations include:
-
-- use appropriately sized virtual warehouses
-- enable auto-suspend
-- use auto-resume
-- prefer incremental processing
-- avoid unnecessary full-table scans
-- isolate workloads where appropriate
-- monitor warehouse and query consumption
-- review clustering/pruning requirements as data volume grows
-
-Streams and Tasks reduce repeated processing by operating on incremental changes.
-
----
-
-## 15. Consumption and Interoperability
-
-The Curated layer is the controlled data-product boundary.
-
-Potential consumers include:
-
-- BI tools
-- data science platforms
-- downstream applications
-- secure data sharing
-- Snowflake Marketplace use cases
-
-The architecture also leaves room for interoperability with S3-based lakehouse technologies such as Apache Iceberg and platforms such as Databricks, instead of treating Snowflake as an isolated analytical system.
-
----
-
-## 16. Reliability Model
-
-The complete delivery chain is:
-
-```text
-HTTP
- |
- v
-PostgreSQL Ledger + Outbox
- |
- | ACID
- v
-DB Poller
- |
- | At-least-once
- v
+Transaction Processing
+        |
+        v
+PostgreSQL + Transactional Outbox
+        |
+        v
 Kafka
- |
- v
-Analytics Worker
- |
- | Batch + retry
- v
-S3
- |
- | Durable replay boundary
- v
-Snowflake Landing
- |
- | Stream / Task / MERGE
- v
-Raw
- |
- v
-Prepared
- |
- v
-Curated
- |
- +--> GC
- |
- +--> HC
+        |
+        v
+Event Integration
+        |
+        v
+Amazon S3
+        |
+        v
+Snowflake Data Platform
+        |
+        +-- Landing
+        +-- Raw
+        +-- Prepared
+        +-- Curated
+                |
+                +-- GC
+                +-- HC
 ```
 
-The architecture combines:
-
-- transactional consistency in PostgreSQL
-- asynchronous delivery with Kafka
-- durable file-based integration through S3
-- replay-safe Snowflake ingestion
-- layered data modeling
-- incremental processing
-- enterprise RBAC
-- PII protection
-- metadata governance
-- lineage
-- reconciliation
-- operational recovery
-- cost-aware analytical processing
+The solution combines **Java transactional engineering, event-driven architecture and enterprise Snowflake data engineering** while maintaining clear boundaries for consistency, scalability, security, governance, auditability and recovery.
